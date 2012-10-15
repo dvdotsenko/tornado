@@ -411,6 +411,15 @@ class IOStream(object):
             return None
         return chunk
 
+    def prepend(self, chunk):
+        """appends to the read buffer."""
+        self._read_buffer.appendleft(chunk)
+        self._read_buffer_size += len(chunk)
+        if self._read_buffer_size >= self.max_buffer_size:
+            logging.error("Reached maximum read buffer size")
+            self.close()
+            raise IOError("Reached maximum read buffer size")
+        return self
     def _read_to_buffer(self):
         """Reads from the socket and appends the result to the read buffer.
 
