@@ -119,6 +119,7 @@ class TCPServer(object):
         """
         sockets = bind_sockets(port, address=address)
         self.add_sockets(sockets)
+        return sockets
 
     def add_sockets(self, sockets):
         """Makes this server start accepting connections on the given sockets.
