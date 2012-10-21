@@ -1575,6 +1575,7 @@ class StaticFileHandler(RequestHandler):
 
         callback({
             'stats': os.stat(abspath)
+            , 'path': abspath # it's modified above in case of serving */ as */index.html
         })
 
     def _read_from_file(self, fp, callback):
@@ -1583,6 +1584,7 @@ class StaticFileHandler(RequestHandler):
     @asynchronous
     @gen.engine
     def get(self, path, include_body=True):
+
         path = self.parse_url_path(path)
         abspath = os.path.abspath(os.path.join(self.root, path))
 
@@ -1597,6 +1599,7 @@ class StaticFileHandler(RequestHandler):
         modified = datetime.datetime.fromtimestamp(answer['stats'][stat.ST_MTIME])
         size = answer['stats'][stat.ST_SIZE]
         etagdata = abspath + '_' + str( answer['stats'][stat.ST_MTIME] ) + '_' + str( answer['stats'][stat.ST_SIZE] )
+        abspath = answer['path']
 
         logging.debug("TORNADO: edata is '%s'" % etagdata)
 
