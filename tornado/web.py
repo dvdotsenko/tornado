@@ -82,6 +82,7 @@ from . import escape
 from . import locale
 from . import stack_context
 from . import template
+from . import gen
 from .escape import utf8, _unicode
 from .util import b, bytes_type, import_object, ObjectDict, raise_exc_info
 
@@ -1525,6 +1526,8 @@ class StaticFileHandler(RequestHandler):
     """
     CACHE_MAX_AGE = 86400 * 365 * 10  # 10 years
 
+    BUFFER_SIZE = 128000
+
     _static_hashes = {}
     _lock = threading.Lock()  # protects _static_hashes
 
@@ -1540,28 +1543,65 @@ class StaticFileHandler(RequestHandler):
     def head(self, path):
         self.get(path, include_body=False)
 
-    def get(self, path, include_body=True):
-        path = self.parse_url_path(path)
-        abspath = os.path.abspath(os.path.join(self.root, path))
+    def _get_file_stats(self, abspath, callback):
         # os.path.abspath strips a trailing /
         # it needs to be temporarily added back for requests to root/
         if not (abspath + os.path.sep).startswith(self.root):
-            raise HTTPError(403, "%s is not in root static directory", path)
+            callback({
+                'error': HTTPError(403, "%s is not in root static directory", path)
+            })
+            return
         if os.path.isdir(abspath) and self.default_filename is not None:
             # need to look at the request.path here for when path is empty
             # but there is some prefix to the path that was already
             # trimmed by the routing
             if not self.request.path.endswith("/"):
                 self.redirect(self.request.path + "/")
+                callback({
+                    'redirected': True
+                })
                 return
             abspath = os.path.join(abspath, self.default_filename)
         if not os.path.exists(abspath):
-            raise HTTPError(404)
+            callback({
+                'error': HTTPError(404)
+            })
+            return
         if not os.path.isfile(abspath):
-            raise HTTPError(403, "%s is not a file", path)
+            callback({
+                'error': HTTPError(403, "Path is not a file")
+            })
+            return
 
-        stat_result = os.stat(abspath)
-        modified = datetime.datetime.fromtimestamp(stat_result[stat.ST_MTIME])
+        callback({
+            'stats': os.stat(abspath)
+            , 'path': abspath # it's modified above in case of serving */ as */index.html
+        })
+
+    def _read_from_file(self, fp, callback):
+        callback( fp.read( self.BUFFER_SIZE ) )
+
+    @asynchronous
+    @gen.engine
+    def get(self, path, include_body=True):
+
+        path = self.parse_url_path(path)
+        abspath = os.path.abspath(os.path.join(self.root, path))
+
+        answer = yield gen.Task(self._get_file_stats, abspath)
+
+        if 'redirected' in answer:
+            self.finish()
+            return
+        elif 'error' in answer:
+            raise answer['error']
+
+        modified = datetime.datetime.fromtimestamp(answer['stats'][stat.ST_MTIME])
+        size = answer['stats'][stat.ST_SIZE]
+        etagdata = abspath + '_' + str( answer['stats'][stat.ST_MTIME] ) + '_' + str( answer['stats'][stat.ST_SIZE] )
+        abspath = answer['path']
+
+        logging.debug("TORNADO: edata is '%s'" % etagdata)
 
         self.set_header("Last-Modified", modified)
 
@@ -1588,18 +1628,31 @@ class StaticFileHandler(RequestHandler):
             if_since = datetime.datetime.fromtimestamp(time.mktime(date_tuple))
             if if_since >= modified:
                 self.set_status(304)
+                self.finish()
                 return
 
-        with open(abspath, "rb") as file:
-            data = file.read()
-            hasher = hashlib.sha1()
-            hasher.update(data)
-            self.set_header("Etag", '"%s"' % hasher.hexdigest())
-            if include_body:
-                self.write(data)
-            else:
-                assert self.request.method == "HEAD"
-                self.set_header("Content-Length", len(data))
+        hasher = hashlib.sha1()
+        hasher.update(etagdata)
+        self.set_header("Etag", '"%s"' % hasher.hexdigest())
+
+        if not include_body:
+            assert self.request.method == "HEAD"
+            self.set_header("Content-Length", size)
+            self.finish()
+            return
+
+        with open(abspath, "rb") as fp:
+            while size:
+                # hoping that send and read happen concurrently,
+                # but knowing we are same thread, not keeping my
+                # hopes up...
+                not_important, chunk = yield [
+                    gen.Task(self.flush)
+                    , gen.Task(self._read_from_file, fp)
+                ]
+                size -= len(chunk)
+                self.write(chunk)
+            self.finish()
 
     def set_extra_headers(self, path):
         """For subclass to add extra headers to the response"""
